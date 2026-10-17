@@ -1,0 +1,171 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Generate Android project and build
+        run: |
+          set -e
+          SRC=$(grep -l VscNative *.html | head -1)
+          if [ -z "$SRC" ]; then echo "No HTML file with VscNative (v138) found in repo root"; exit 1; fi
+          echo "Using $SRC"
+          mkdir -p /tmp/proj && cd /tmp/proj
+          mkdir -p app/src/main/assets app/src/main/java/ir/zaminkav/app
+          cp "$GITHUB_WORKSPACE/$SRC" app/src/main/assets/index.html
+          cat > settings.gradle <<'ZK_EOF_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ZaminKav"
+          include ':app'
+          ZK_EOF_0
+          cat > build.gradle <<'ZK_EOF_1'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          ZK_EOF_1
+          cat > gradle.properties <<'ZK_EOF_2'
+          org.gradle.jvmargs=-Xmx2g
+          ZK_EOF_2
+          cat > app/build.gradle <<'ZK_EOF_3'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'ir.zaminkav.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'ir.zaminkav.app'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          ZK_EOF_3
+          cat > app/src/main/AndroidManifest.xml <<'ZK_EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-feature android:name="android.hardware.sensor.compass" android:required="false"/>
+              <application android:label="زمین‌کاو" android:usesCleartextTraffic="false" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          ZK_EOF_4
+          cat > app/src/main/java/ir/zaminkav/app/MainActivity.java <<'ZK_EOF_5'
+          package ir.zaminkav.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.hardware.Sensor;
+          import android.hardware.SensorEvent;
+          import android.hardware.SensorEventListener;
+          import android.hardware.SensorManager;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.webkit.*;
+          import android.widget.Toast;
+          import java.io.OutputStream;
+
+          public class MainActivity extends Activity implements SensorEventListener {
+              private WebView web;
+              private ValueCallback<Uri[]> fileCb;
+              private SensorManager sm;
+              private volatile String last = "";
+              private boolean on = false;
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, 1);
+                  sm = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setGeolocationEnabled(true);
+                  s.setAllowFileAccess(true);
+                  s.setAllowFileAccessFromFileURLs(true);
+                  s.setAllowUniversalAccessFromFileURLs(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  web.addJavascriptInterface(new Native(), "VscNative");
+                  web.setWebViewClient(new WebViewClient());
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override public void onGeolocationPermissionsShowPrompt(String o, GeolocationPermissions.Callback cb) { cb.invoke(o, true, false); }
+                      @Override public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                          i.addCategory(Intent.CATEGORY_OPENABLE);
+                          i.setType("*/*");
+                          try { startActivityForResult(Intent.createChooser(i, "File"), 7); } catch (Exception e) { fileCb = null; return false; }
+                          return true;
+                      }
+                  });
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override protected void onActivityResult(int rq, int rs, Intent d) {
+                  if (rq == 7 && fileCb != null) {
+                      Uri[] r = null;
+                      if (rs == RESULT_OK && d != null) r = WebChromeClient.FileChooserParams.parseResult(rs, d);
+                      fileCb.onReceiveValue(r); fileCb = null;
+                  }
+              }
+              @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
+              @Override public void onSensorChanged(SensorEvent e) { last = e.values[0] + "," + e.values[1] + "," + e.values[2]; }
+              @Override public void onAccuracyChanged(Sensor s, int a) {}
+              @Override protected void onPause() { super.onPause(); }
+
+              public class Native {
+                  @JavascriptInterface public boolean available() { return sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null; }
+                  @JavascriptInterface public void start() {
+                      if (on) return;
+                      Sensor m = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+                      if (m != null) { sm.registerListener(MainActivity.this, m, SensorManager.SENSOR_DELAY_GAME); on = true; }
+                  }
+                  @JavascriptInterface public void stop() { sm.unregisterListener(MainActivity.this); on = false; last = ""; }
+                  @JavascriptInterface public String mag() { return last; }
+                  @JavascriptInterface public void save(String name, String mime, String b64) {
+                      try {
+                          ContentValues v = new ContentValues();
+                          v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                          v.put(MediaStore.Downloads.MIME_TYPE, (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime);
+                          Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                          OutputStream o = getContentResolver().openOutputStream(u);
+                          o.write(Base64.decode(b64, Base64.DEFAULT)); o.close();
+                          runOnUiThread(() -> Toast.makeText(MainActivity.this, "Downloads: " + name, Toast.LENGTH_LONG).show());
+                      } catch (Exception e) {
+                          runOnUiThread(() -> Toast.makeText(MainActivity.this, "Save failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                      }
+                  }
+              }
+          }
+          ZK_EOF_5
+          gradle assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/zaminkav.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zaminkav-apk
+          path: zaminkav.apk
